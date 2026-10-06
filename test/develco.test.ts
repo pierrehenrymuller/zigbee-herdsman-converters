@@ -255,3 +255,81 @@ describe("Develco SIRZB-110 is not changed by the SIRZB-111 fix", () => {
         expect(startWarningInfo(endpoint)).toBe(0xd1);
     });
 });
+
+describe("Develco SIRZB-111 max_duration", () => {
+    function onEvent(definition: Definition, event: unknown) {
+        return definition.onEvent?.(event as Parameters<NonNullable<Definition["onEvent"]>>[0]);
+    }
+
+    function baseData(device: Zh.Device, options: KeyValueAny) {
+        return {device, options, state: {}, deviceExposesChanged: () => {}};
+    }
+
+    it("offers a max_duration_setpoint device option", () => {
+        const options = getDefinition("SIRZB-111").options ?? [];
+        expect(options.map((option) => option.name)).toContain("max_duration_setpoint");
+    });
+
+    it.each([
+        [{type: "start"}],
+        [{type: "deviceAnnounce"}],
+        [{type: "deviceInterview", status: "successful"}],
+        [{type: "deviceOptionsChanged", from: {}, to: {max_duration_setpoint: 1800}}],
+    ])("writes and reads back the setpoint on %j", async (event) => {
+        const device = mockSiren("SIRZB-111");
+        const endpoint = device.getEndpoint(43);
+        vi.mocked(endpoint.read).mockResolvedValueOnce({maxDuration: 1800});
+        const {type, ...extra} = event as KeyValueAny;
+        await onEvent(getDefinition("SIRZB-111"), {type, data: {...baseData(device, {max_duration_setpoint: 1800}), ...extra}});
+        expect(endpoint.write).toHaveBeenCalledWith("ssIasWd", {maxDuration: 1800});
+        expect(endpoint.read).toHaveBeenCalledWith("ssIasWd", ["maxDuration"]);
+    });
+
+    it.each([
+        ["no setpoint configured", {type: "start"}, {}],
+        ["a failed interview", {type: "deviceInterview", status: "failed"}, {max_duration_setpoint: 1800}],
+        [
+            "an unrelated option change",
+            {type: "deviceOptionsChanged", from: {a: 1, max_duration_setpoint: 1800}, to: {a: 2, max_duration_setpoint: 1800}},
+            {max_duration_setpoint: 1800},
+        ],
+    ])("does not write on %s", async (_, event, options) => {
+        const device = mockSiren("SIRZB-111");
+        const endpoint = device.getEndpoint(43);
+        const {type, ...extra} = event as KeyValueAny;
+        await onEvent(getDefinition("SIRZB-111"), {type, data: {...baseData(device, options), ...extra}});
+        expect(endpoint.write).not.toHaveBeenCalled();
+    });
+
+    it("ignores the stop event", async () => {
+        const device = mockSiren("SIRZB-111");
+        await onEvent(getDefinition("SIRZB-111"), {type: "stop", data: {ieeeAddr: device.ieeeAddr}});
+        expect(device.getEndpoint(43).write).not.toHaveBeenCalled();
+    });
+
+    it("does nothing on a device without an IAS WD endpoint", async () => {
+        const device = mockDevice({modelID: "SIRZB-111", endpoints: [{ID: 1, inputClusters: ["genOnOff"]}]});
+        await expect(
+            onEvent(getDefinition("SIRZB-111"), {type: "start", data: baseData(device, {max_duration_setpoint: 1800})}),
+        ).resolves.toBeUndefined();
+        expect(device.getEndpoint(1).write).not.toHaveBeenCalled();
+    });
+
+    it("does not throw when the device is unreachable", async () => {
+        const device = mockSiren("SIRZB-111");
+        vi.mocked(device.getEndpoint(43).write).mockRejectedValueOnce(new Error("Timeout"));
+        await expect(
+            onEvent(getDefinition("SIRZB-111"), {type: "start", data: baseData(device, {max_duration_setpoint: 1800})}),
+        ).resolves.not.toThrow();
+    });
+
+    it("logs an error when the device does not keep the setpoint", async () => {
+        const {logger} = await import("../src/lib/logger");
+        const error = vi.spyOn(logger, "error");
+        const device = mockSiren("SIRZB-111");
+        vi.mocked(device.getEndpoint(43).read).mockResolvedValueOnce({maxDuration: 900});
+        await onEvent(getDefinition("SIRZB-111"), {type: "start", data: baseData(device, {max_duration_setpoint: 1800})});
+        expect(error).toHaveBeenCalledWith(expect.stringContaining("1800"), expect.any(String));
+        error.mockRestore();
+    });
+});

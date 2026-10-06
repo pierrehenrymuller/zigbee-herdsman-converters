@@ -2040,6 +2040,47 @@ export function iasWarning(args: IasWarningArgs = {}): ModernExtend {
         } satisfies Fz.Converter<"ssIasZone", undefined, ["commandStatusChangeNotification", "attributeReport", "readResponse"]>);
     }
 
+    const options: NonNullable<ModernExtend["options"]> = [];
+    const onEvent: OnEvent.Handler[] = [];
+    if (maxDuration) {
+        const setpointKey = "max_duration_setpoint";
+        options.push(
+            e
+                .numeric(setpointKey, ea.SET)
+                .withUnit("s")
+                .withValueMin(maxDurationArgs.min ?? 0)
+                .withValueMax(maxDurationArgs.max ?? 65534)
+                .withDescription(
+                    "Max duration written to the device when Zigbee2MQTT starts, when the device announces itself, after an interview " +
+                        "and when this option changes, so that a reset device gets it back. Leave empty to keep the value of the device.",
+                ),
+        );
+        onEvent.push(async (event) => {
+            if (event.type === "stop") return;
+            const apply =
+                event.type === "start" ||
+                event.type === "deviceAnnounce" ||
+                (event.type === "deviceInterview" && event.data.status === "successful") ||
+                (event.type === "deviceOptionsChanged" && event.data.from[setpointKey] !== event.data.to[setpointKey]);
+            const setpoint = event.data.options[setpointKey];
+            if (!apply || setpoint == null || setpoint === "") return;
+
+            const value = toNumber(setpoint, setpointKey);
+            const device = event.data.device;
+            const endpoint = device.endpoints.find((ep) => ep.supportsInputCluster("ssIasWd"));
+            if (!endpoint) return;
+            try {
+                await endpoint.write("ssIasWd", {maxDuration: value});
+                const result = await endpoint.read("ssIasWd", ["maxDuration"]);
+                if (result.maxDuration !== value) {
+                    logger.error(`'${device.ieeeAddr}' kept max_duration ${result.maxDuration} instead of the setpoint ${value}`, NS);
+                }
+            } catch (error) {
+                logger.warning(`Failed to apply max_duration ${value} to '${device.ieeeAddr}' (${error})`, NS);
+            }
+        });
+    }
+
     const maxDurationConverter: Tz.Converter = {
         key: ["max_duration"],
         convertSet: async (entity, key, value, meta) => {
@@ -2118,7 +2159,7 @@ export function iasWarning(args: IasWarningArgs = {}): ModernExtend {
         ...(maxDuration ? [maxDurationConverter] : []),
     ];
 
-    return {fromZigbee, toZigbee, exposes, isModernExtend: true};
+    return {fromZigbee, toZigbee, exposes, options, onEvent, isModernExtend: true};
 }
 
 // #endregion
